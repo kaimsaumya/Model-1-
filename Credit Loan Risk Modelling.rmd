@@ -1,0 +1,483 @@
+---
+author: "Saumya Kaim"
+date: "09/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction 
+
+The analysis of credit risk and the decision making for granting loans is one of the most important operations for financial institutions. Taking previous results, we will train a glm model through binomial logistic regression to accuartely predict future outcomes for a debtor who will default which is a key component in measuring for credit risk customers. To solve this classfication, logistic regression will be widely used. 
+```{r , message = FALSE, warning = FALSE} 
+
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(readr) 
+library(lubridate)
+library(magrittr)
+library(plyr)
+library(dplyr) 
+library(gridExtra) 
+library(MASS)
+
+library(glmnet)
+# Visualization packages
+
+library(ggplot2) 
+library(plotly)
+library(ggthemes)
+require(GGally)
+require(reshape2)
+require(lme4)
+require(compiler)
+require(parallel)
+require(boot)
+require(lattice)
+
+```
+## Load the data
+
+After all the libraries have been installed, let's move ahead to loading the data for analysis. The data is taken as a customer's loan data where $repay_fail$ is the dependent variable to be used with other independent variables as a customer's records from their date of opening account to their loan status either as a defaulter, charged off, and paid. Reapy_fail as 0 and 1 suggests, that the borrower eithes fails to pay the loan, or pays fully. 
+```{r, warnings = FALSE}
+loan_data <- read.csv("final_data.csv", header=TRUE, stringsAsFactors=FALSE, fileEncoding="latin1")
+head(loan_data)
+
+```
+# Range of variables(or feature selection given some variables may be important from the business point of view) removed are as follows:
+
+1. Index is removed.
+2. $id$ and $member_id$ can be removed too. 
+3. $funded_amnt_inv$ can be removed as it almost similar as the $funded_amnt$ as the former is also the loan for the borrower but which the investor commits. There hardly would be any value diffrence to the actual funded amount and amount committed by the investor.
+4. $issue_d$ is more a metric from a business point of view. 
+5. $zip_code$ and $addr_state$ are not reasonable without having more information.
+6. $earliest_cr_line$ is more reasonable from a business prespective as it can not be predictor for borrower's loan fails. 
+7. $mths_since_last_delinq$ and $revol_util$ are removed due to the abundance of missing data.
+8. $last_pymnt_amnt$ , $last_credit_pull_d$, $last_pymnt_d$, and $next_pymnt_d$ are records better for collector's records and borrowers as to when their next payment is due. 
+
+Here, we are selecting all the variables which will further be used in the regression model to find a better fit for prediction of repay_fails. 
+```{r, }
+loan_df = loan_data %>% dplyr ::select("loan_amnt", "funded_amnt", "term","int_rate", "installment", "emp_length", "home_ownership", "annual_inc", "loan_status", "dti", "delinq_2yrs", "inq_last_6mths", 
+  "pub_rec", "revol_bal", "repay_fail", "purpose", "verification_status") 
+#head(loan_df)
+```
+
+# Before, exploration, we will deal with the missing data, if the missing data is less in number, removing the rows would not affect our analysis.
+
+```{r}
+sapply(loan_df , function(x) sum(is.na(x)))
+```
+## Data Cleaning
+
+Data cleaning is required before the exploratory analysis. Here, we are removing all NA's. 
+```{r}
+#removing NA values 
+
+loan_df = loan_df %>% 
+  filter(!is.na(loan_amnt), !is.na(annual_inc), !is.na(installment), 
+         !is.na(delinq_2yrs), !is.na(delinq_2yrs), !is.na(inq_last_6mths), !is.na(pub_rec), !is.na(revol_bal))
+summary(loan_df)
+```
+
+```{r}
+# To convert variables into factors, applying a function class to check which one needs to be converted
+sapply(loan_df, class)
+```
+
+# Convert few variables as categorical varaibles. 
+```{r}
+loan_df$term <- factor(loan_df$term)  
+loan_df$home_ownership <- factor(loan_df$home_ownership)
+loan_df$loan_status <- factor(loan_df$loan_status)
+loan_df$emp_length <- factor(loan_df$emp_length)
+loan_df$verification_status <- factor(loan_df$verification_status)
+loan_df$purpose <- factor(loan_df$purpose)
+
+
+```
+
+# Checking class, if any is left to be converted to categorical variable
+```{r}
+sapply(loan_df, class)
+```
+
+## Exploratory visualisations
+
+In order to create an accuracte GLM model to prodecit our response varibale "repay_fail", we must first take a dive into the provided data. It is likely that the provided data will contain incomplete values, so we must first look through to remove any unusable data. 
+
+Below code, shows high correlation > 0.85 for funded_amnt, installments with loan_amnt. Hence, removing the covariates and keeping loan_amnt would be valid.
+```{r, warnings = FALSE, message = FALSE}
+ggpairs(loan_df[, c("loan_amnt", "int_rate", "annual_inc", "installment", "funded_amnt", "delinq_2yrs", "inq_last_6mths", "pub_rec", "revol_bal",
+                     "dti")])
+```
+
+Let's see how term, home ownership, loan status are related to the proportion of repay fail.
+```{r}
+
+# Data management for loan status
+revalue(loan_df$loan_status, c("Does not meet the credit policy. Status:Charged Off" = "Charged Off")) -> loan_df$loan_status
+revalue(loan_df$loan_status, c("Does not meet the credit policy. Status:Fully Paid" = "Fully Paid")) -> loan_df$loan_status
+loan_df %>% group_by(loan_df$loan_status) %>% dplyr::summarize(total = n()) -> loan_status_data
+loan_df %>% group_by(loan_df$loan_status) %>% dplyr::summarize(total = n()) -> loan_status_data
+# Chart with customer living and loan status
+ggplot(data=loan_df, aes(x=home_ownership, fill=loan_status)) + geom_bar()
+ggplotly(p = ggplot2::last_plot())
+ 
+```
+From above we can see that the the largest proportion of "Charged Off" results from those who are currently renting or have a morgage, with the smallets coming from home owners. 
+
+
+We can also look at the distributions between the interest rates and loan amounts. 
+```{r, warning= FALSE, message = FALSE}
+#Loan amount
+
+ggplot(data = loan_df, aes(x = loan_amnt)) + geom_bar(color = 'red')
+#ggplotly(p = ggplot2::last_plot())
+
+ggplot(data = loan_df, aes(x = int_rate)) + geom_bar(color = 'red') + xlim(5, 25)
+#ggplotly(p = ggplot2::last_plot())
+```
+Also, Lower the interest rate, lower the term to pay the loan amount
+
+Another important categorical variable is the term length. The length in which a loan is repayed can have an effect on not only the interest rate, but also the installement amount. These two factors can have a large influence on if somebody is unable to repay a loan. Below we can see how the breakdowns of interest rate in addition to loan amount for both 36 month and 60 month terms. 
+```{r}
+ggplot(data = loan_df, aes(x = loan_amnt, fill = term)) + geom_histogram()
+ggplotly(p = ggplot2::last_plot())
+
+
+ggplot(data = loan_df, aes(x = int_rate, fill = term)) + geom_histogram()
+ggplotly(p = ggplot2::last_plot())
+```
+These plots show that while a 36 month term is far more common, there are 36 month loans that have the same ammount owing as a 60 month term, which is likely to add stress to the customer on repayments. In addition to this, there are many 60 month loans that have very high interest rates, which is also likely to put strain on the customer. With the assistance of the below box plot, we can see that the median interest rate is significantly higher for 60 month terms when compared to 36 month terms. 
+
+When we view the likelihood for a customer to fail a repaymeent, we are able to view the loan amount and interst rate in relation to the response variable. 
+```{r}
+#Box plot interest rate and purpose
+
+p1<- boxplot(loan_df$loan_amnt~loan_df$repay_fail,ylab="Loan amount",xlab="Default",col = "light blue")
+p2 <- boxplot(loan_df$int_rate~loan_df$repay_fail,ylab="Interest rate",xlab="Default",col = "light blue")
+p3 <- boxplot(loan_df$int_rate ~ loan_df$purpose,col = "light blue", ylab="Interest Rate",xlab="Purpose")
+p4 <- boxplot(loan_df$int_rate ~ loan_df$term,col = "light blue", ylab="Interest Rate",xlab="Term")
+
+ggarrange(p1, p2, p3, p4)
+```
+From the above blox plots, it can be seen that in general, the distribution of loan amounts for failed repayments is approximately the same as those who have successfully repaid loans. This differs when we start to look at the distribution of interest rate for both groups. When splitting interest rate in terms of our response variable, we can see there is a significant difference in the median interest rate, suggesting interst rate for loans are a large contributing factor for customers defaulting. 
+
+## To find what impact does annual income has on other variables 
+When relating this back to the terms length for a loan, it can be seen below that the loans with a 60 month term have a much higher likleihood of defaulting with a rate of 30.44%. The 36 month term loans were far safer, only having a repay_fail rate of 14.04%. This shows that the loan term had a high impact on the likelihood of failing a repayment. 
+
+
+```{r}
+
+p5 <- ggplot(data=loan_df, aes(x = loan_status, y = loan_amnt, fill = repay_fail))+
+  geom_boxplot()+ 
+  labs(x = "Loan Status", y= "loan_amnt")+ theme_bw() + coord_flip()
+p5
+```
+From the above box-plots, it can be seen the defaulters are likely to default between $15,000 to $20,000 range. Also, the borrowers who have loan status as "Current" are seen to more towards proportion of a risky customer, for a loan amount ranging between $10,000 to $25,000. 
+
+
+```{r}
+Independent_cov <- melt(loan_df[, c("repay_fail", "loan_amnt", "int_rate", "annual_inc")],
+  id.vars="repay_fail")
+ggplot(Independent_cov, aes(factor(repay_fail), y = value, fill=factor(repay_fail))) +
+  geom_boxplot() + 
+  facet_wrap(~variable, scales="free_y")
+```
+From, the above plot, it can be seen, the rate or probablity of a borrower to be a defaulter or risky for a loan amount is equivalent for 0 and 1. Interest rate seems to be in favour of those who will not pose a risk, given they will be those borrowers who will have higher income. However, borrowers with high interest rate i.e. between 10% to 15 % also pose a high amount of risk for the bank to accept the loan application of such customers. 
+
+
+Here, for categorical variable, we are analyzing the frequency of each category with respect to the dependent variable. 
+```{r}
+y_fail <- loan_df$repay_fail
+xtabs(~y_fail + term, data = loan_df)
+```
+
+```{r}
+y_fail <- loan_df$repay_fail
+xtabs(~y_fail + home_ownership, data = loan_df)
+```
+
+```{r}
+y_fail <- loan_df$repay_fail
+xtabs(~y_fail + loan_status, data = loan_df)
+
+```
+# Binomial modelling Process:
+
+1. $repay_fail$ which will be our response variable. This is a binary variable.
+2. Removing the columns from the dataframe which were highly correlated. Creating from the same dataframe by removing irrelevant variables, we will use these relevant variables for further prediction of the binary outcome.
+3. We split the dataset to training set(75%) and testing set(25%) for the validation.
+4. We train a model to predict the probability of borrowers who are more likely to be at risk.
+
+Because of the binary response variable we can use logistic regression. This probability can be computed by the logistic function:
+
+P = exp($b0$ + $b1x1$ + ... + $bNxN$) / [ 1 + exp($b0$ + $b1x1$ + ... + $bNxN$) ]
+
+where
+* P is the probability of borrower as a defaulter 
+* b0 , b1 , ... , bN are the coefficient estimates
+* N the number of observations
+* x1 , ... , xN are the independent variables
+
+The reason data is spilt on the basis of current(loan_status) is because predicting on these borrowers the percentage of either failing repaying their loan or not is more significant. 
+```{r}
+#split dataset
+#split dataset
+
+loan_df$repay_fail = as.numeric(loan_df$repay_fail)
+dropping <- c("loan_status", "emp_length", "funded_amnt", "installment")
+
+pred <- which(loan_df$loan_status == c("Current"))
+
+preddata <- loan_df[pred, !names(loan_df) %in%dropping]
+training <- loan_df[-pred, !names(loan_df) %in%dropping]
+
+ind <- sample(2, nrow(training), replace = TRUE, prob = c(0.75, 0.25))
+tdata <- training[ind ==1,]
+vdata <- training[ind ==2,]
+
+
+```
+# IMPLEMENTATION OF MODEL USING LOGISTIC REGRESSION(in this case, Binomial  Regression)
+
+We will intially choose a generalised linear model to predict the binary outcome using logit link function. Two models were build to determine which would be more optimal in predicting loan repay risk or not. The first model as seen below is built using all predictors in the dataset against the dependent variable $repay_fail$. 
+The second model is built using the stepwise regression algorithm which helps determining the best predictors to use. 
+
+Running the first model with all the predictor variables, these are the following findings, the summary statistics helps us in understanding the model better by providing us with the following information:
+
+1. Distribution of the deviance residuals.
+2. Intercept and slope estimates along with the standard error, z-value and p-value. 
+3. AIC value.
+4. Residual and Null deviance.
+
+Interpretation of Results
+
+For continous variables, the interpretation(for statistically significant variables) is as follows:
+
+a) For every one unit increase in annual income, the log odds of a borrower being a repay fail(default) or not decreases by 0.000000684.
+b) Similarly, for every one unit increase in Interest rate($int_rate$), the log odds of a borrower being a default or not, increases by 0.124. 
+c) Similarly, for every one unit increase in number of credit inquires($inq_last_6mths$), the log odds of a borrower being a default or not, increases by 0.118.
+d) Similarly, for every one unit increase in number of delinquency years($delinq_2yrs$), the log odds of a borrower being a default or not, increases by 0.000813.
+e) For every one unit increase in a credit revolving balance, the log odds of a borrower being a default or not, increases by 0.0000005.
+
+For categorical variables, the performance of each category is evaluated with respect to a base category. The interpretation of such variables are as follows:
+
+a) Being in the term bucket of 60 months vs 36 months, it changes the log of odds of being a risk borrower (versus being not a risky borrower) by 0.518.
+b) Similarly, being in the purpose bucket of medical level versus other levels, it changeshe log of odds of being a risk borrower (versus being not a risky borrower) by 0.614.
+
+Also, Residual deviance of the glm is not large relative to the residual segree of freedom. Hence, No overdispersion. 
+```{r, warning= FALSE, message = FALSE}
+
+glm_model = glm(repay_fail ~ . , tdata , family = binomial(link = 'logit'), maxit = 100)
+summary(glm_model)
+```
+## Variable Selection
+
+The $glm_model$ might not be the best model with the given set of independent variables, however there are mutiple methodolgies for a vraible selection. 
+Here, the 'stepAIC' function in R performs a stepwise model selection with an objective to minimize the AIC value. 
+
+After implementing the 'stepAIC' funtion we are left with term, int_rate, home_ownership, annual_inc, dti, inq_last_6mths, pub_rec, revol_bal, purpose, and  verification_status(it is significant but not that much, still will be included due to a variation of a small significance). These independent variables, of all the posiible model formulas, has the minimum AIC value. 
+
+```{r,warning= FALSE, message= FALSE}
+glm_model1 <- stepAIC(glm_model)
+```
+
+#Using 'logit' link function on the devised model
+
+```{r, warning= FALSE, message= FALSE}
+glm_model2 = glm(repay_fail ~  term + int_rate + annual_inc + inq_last_6mths + pub_rec + revol_bal + purpose + dti, tdata , family = binomial(link = 'logit'))
+summary(glm_model2)
+```
+
+#Using 'probit' link function on the devised model
+
+```{r, warning= FALSE, message= FALSE}
+glm_model3 = glm(repay_fail ~  term + int_rate + annual_inc + inq_last_6mths + pub_rec + revol_bal + purpose + dti , tdata , family = binomial(link = 'probit'))
+summary(glm_model3)
+```
+
+#Using 'cloglog' function on the devised model
+
+```{r, warning= FALSE, message= FALSE}
+glm_model4 = glm(repay_fail ~  term + int_rate + annual_inc + inq_last_6mths + pub_rec + revol_bal + purpose + dti, tdata , family = binomial(link = 'cloglog'))
+summary(glm_model4)
+```
+
+Checking the AIC value of the three models with an objective to choose one, with the lowest AIC value. 
+
+From the below results, the logit link function seems to be showing a lower value. 
+```{r}
+
+glm_model2$aic   #logit link function
+glm_model3$aic   #probit link function
+glm_model4$aic   #cloglog link function
+
+```
+
+## Check through test if there is enough evidence to support null hypothesis 
+Critical value is greater than the calculated value, so it is a good fit of the data
+##Null: the model is fit
+```{r}
+dev_stat <- sum(residuals(glm_model2, ttype = "pearson")^2)
+dev_stat
+qchisq(0.95, df=dim(loan_df)[1])-16
+```
+
+# Analysis of the outcome
+
+```{r, warning = FALSE, message = FALSE}
+
+glm_model2.stdres = rstandard(glm_model2)
+plot(glm_model2.stdres)
+summary(glm_model2$fitted.values)
+```
+
+# We can further inspect the residualizing the simulation method in DHARMa package to confirm the suitability of the GLM model.
+
+```{r}
+library("DHARMa")
+res=simulateResiduals(glm_model2)
+plot(res)
+```
+As shown above in the result, there is not lot of deviation from the uniform line or the uniform distribution, hence, providing a strong evidence to suggest that the distribution of residuals match the expected distribution under the GLM. 
+
+
+Below, shows the distribution of predicted probabilities of "1" non-repay fails.
+```{r}
+hist(glm_model2$fitted.values, main = "Histogram", xlab = "Probability of non-repay fail", col = "Light Blue")
+```
+
+## USING REVISED MODEL FOR MAKING PREDICTIONS ON THE TEST DATA SET
+Here, we will store the prediction values in a vector name 'preds' and add it in the validation/test dataset which here is 'vdata'.
+```{r}
+# Prediction on validation data set 
+
+preds = predict(glm_model2, vdata, type = 'response')
+#preds
+```
+## CONFUSION MATRIX 
+
+The confusion matrix describes the performance of the classifier. It is a table with four different combinations of predicted and actual values, true positives, true negatives, false positives, and false negatives. It is extremely useful for measuring Recall, Precision, Specificity, Accuracy and most importantly AUC-ROC Curve. Below is the confusion matrix for the binary classifier.
+```{r }
+k = 0
+accuracy = c()
+sensitivity = c()
+specificity = c()
+for(i in seq(from = 0.01 , to = 0.5 , by = 0.01)){
+        k = k + 1
+        p_bin = ifelse(preds > i , 1 , 0)
+        confmatrix = table(vdata$repay_fail , p_bin)
+        accuracy[k] = sum(diag(confmatrix)) / sum(confmatrix)
+        sensitivity[k] = confmatrix[1 , 1] / sum(confmatrix[ , 1])
+        specificity[k] = confmatrix[2 , 2] / sum(confmatrix[ , 2])
+}
+
+threshold1 = seq(from = 0.01 , to = 0.5 , by = 0.01)
+data1 = data.frame(threshold1 , accuracy , sensitivity , specificity)
+head(data1)
+
+```
+
+A threshold of 20-30% seems valid, as the cut off percentage does not have significant impact on the accuracy of the model. The model has higher sensitivity around that threshold as well. 
+```{r}
+#Through threshold calculating overall accuracy, sensitivity, specificity to show 
+
+#lapply(vdata, as.numeric)
+preds1 = ifelse(preds > 0.30 , 1 , 0)
+
+tab1 = table(Predicted = preds1, Actual = vdata$repay_fail)
+print(tab1)
+efficiency <- sum(diag(tab1))/sum(tab1)*100  #accuracy
+efficiency
+```
+
+
+# Training set ROC and accuracy curve
+
+Below, shows the curve ROC for traning dataset, we can see the curve is inclined more towards the true positive rate, performing better than the benchmark on blackboard. 
+```{r}
+library(ROCR)
+
+# Make predictions on training set
+predictTrain = predict(glm_model2, type="response")
+
+# Prediction function
+ROCRpred = prediction(predictTrain, tdata$repay_fail)
+
+# Performance function
+ROCRperf = performance(ROCRpred, "tpr", "fpr")
+
+# Plot ROC curve
+plot(ROCRperf)
+```
+From the above results, the curve seems to be closer to the true positive rate, showing the accuracy more towards sensitivity. The more accuracte, the good is the test. 
+
+
+# Train set Area under the curve(AUC)
+```{r,warning= FALSE, message= FALSE}
+#Area Under Curve
+
+library(pROC)
+acc <- auc(roc(tdata$repay_fail, predictTrain))
+acc
+```
+
+# Test datadet AUC and ROC curve
+
+The below ROC curve and AUC for test dataset, a curve is more inclined to the upper true positive corner indicating a better performing test. The Area under the Curve is only at 70.39% which is acceptable. 
+```{r, warning= FALSE, message= FALSE}
+require(ROCR)
+require(pROC)
+
+rocplot <- function(pred, truth, ...) {
+  predob = prediction(preds, truth)
+  perf = performance(predob, "tpr", "fpr")
+  plot(perf, ...)
+  area <- auc(truth, preds)
+  area <- format(round(area, 4), nsmall = 4)
+  text(x=0.8, y=0.1, labels = paste("AUC =", area))
+
+  # the reference x=y line
+  segments(x0=0, y0=0, x1=1, y1=1, col="gray", lty=2)
+}
+
+rocplot(vdata, vdata$repay_fail, col="blue")
+```
+
+## CONCLUSIONS and RECOMMENDATIONS: 
+
+1. The finding of this study provides a significant impact on factors on predicting which borrower will likely to default on the basis of their background. 
+2. The coefficients of the following features which are positive, they are more likely in direct relation towards the probability of defualting on loan by a borrower.
+For example: 
+* Term at 60 months, the more the months, the more difficult to act as risky borrower. 
+* Interest rate: the more the interest rate, more likely the customer(borrower) is prone to be at risk. 
+* Home-ownership - Others, there is not much significance seen for this variable.
+* Purpose - Medical/Moving/Other, shows a significant difference, directly in relation to the borrower likely to be a defaulter. 
+* Purpose: Other, and small business seem to have a significant affect on the borrowers likely to default for risk, due to small business in the market. 
+
+3. The coefficients of the following features which are negative, they are more likely to be in indirect relation towards the probability of defualting on loan by a borrower.
+For example:
+* Annual Income, the larger the annual income, the less risk for a borrower to be likely at default. 
+* Purpose: wedding seem to have effect on the borrower who are likely to defeault if they have borrowed more than their annual income which also has a significant impact, if it low. Only if the annual income is high, the less risk for a borrower to be likely at default or at risk. 
+
+4. The model also showed that borrower's deliquency status, and verification status is not a major deciding factor. 
+
+5. The model also shows factor such as purpose to be really significant in terms of educational loans or small business. This concludes that borrowers who are likely towards a career settlement, and those run a small-scale production are likely to generate good interest rate, however making them equally vulnerable for a defaulter in future. 
+
+6. The AUC for testing dataset is 70.3% which is acceptable enough to justify a good model fit for this analysis. 
+
+7. Banks can use this model to create a Loan Defaulter Strategy for every application, and minimise the loan risk rate from their portfolio. 
+
+
+
+
+
+
+
+
+
+
